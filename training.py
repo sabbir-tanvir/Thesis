@@ -120,29 +120,65 @@ class BnHTRDataset(Dataset):
 
 #Use Hugging Face transformers for ViT:
 
-from transformers import ViTForImageClassification, TrainingArguments, Trainer
+from transformers import ViTModel
+import torch.nn as nn
 
-model = ViTForImageClassification.from_pretrained(
-    "google/vit-base-patch16-224",
-    num_labels=len(tokenizer.vocab),  # Adjust based on tokenizer
-    ignore_mismatched_sizes=True
-)
+class ViTForBengaliOCR(nn.Module):
+    def __init__(self, vocab_size):
+        super().__init__()
+        self.vit = ViTModel.from_pretrained("google/vit-base-patch16-224")
+        self.classifier = nn.Linear(self.vit.config.hidden_size, vocab_size)  # Output per-patch logits
 
-# Define training arguments
-training_args = TrainingArguments(
-    output_dir='./results',
-    per_device_train_batch_size=16,
-    evaluation_strategy="epoch",
-    num_train_epochs=10,
-)
+    def forward(self, pixel_values):
+        outputs = self.vit(pixel_values=pixel_values)
+        sequence_output = outputs.last_hidden_state  # Shape: (batch_size, num_patches, hidden_size)
+        logits = self.classifier(sequence_output)  # Shape: (batch_size, num_patches, vocab_size)
+        return logits
+    
 
-# Initialize Trainer
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    train_dataset=train_dataset,
-    eval_dataset=val_dataset,
-)
 
-# Start training
-trainer.train()
+from torch.utils.data import Dataset
+
+class BnHTRDataset(Dataset):
+    def __init__(self, image_paths, text_mapping, tokenizer, token_to_id, transform=None):
+        self.image_paths = image_paths
+        self.text_mapping = text_mapping
+        self.tokenizer = tokenizer
+        self.token_to_id = token_to_id
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        image = Image.open(img_path).convert('L')  # Convert to grayscale
+
+        # Extract document ID (e.g., "1" from "1_1.jpg")
+        doc_id = os.path.basename(img_path).split('_')[0]
+        text = self.text_mapping.get(doc_id, "")
+
+        # Tokenize and convert to IDs
+        tokens = self.tokenizer.tokenize(text)
+        token_ids = [self.token_to_id.get(token, self.token_to_id['<UNK>']) for token in tokens]
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image, torch.tensor(token_ids)
+    
+
+
+from torch.nn.utils.rnn import pad_sequence
+
+def collate_fn(batch):
+    images = [item[0] for item in batch]
+    token_ids = [item[1] for item in batch]
+
+    # Pad token sequences
+    padded_ids = pad_sequence(token_ids, batch_first=True, padding_value=token_to_id['<PAD>'])
+
+    # Stack images
+    images = torch.stack(images)
+
+    return images, padded_ids
